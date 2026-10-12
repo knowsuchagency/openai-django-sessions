@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
 from asgiref.sync import sync_to_async
@@ -38,6 +40,7 @@ class DjangoSession(SessionABC):
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
         create_tables: bool = False,
+        skip_duplicate_items: bool = False,
     ) -> None:
         """Initialize a Django session.
 
@@ -47,8 +50,15 @@ class DjangoSession(SessionABC):
             messages_table: Database table name for conversation messages.
             create_tables: If True, create tables if they don't exist.
                           Only use in development/testing.
+            skip_duplicate_items: If True, ``add_items`` skips any item identical
+                          to one this instance already added. Useful when several
+                          agents run in turn on the same session with the same
+                          user input, which would otherwise store that input
+                          once per run.
         """
         self.session_id = session_id
+        self._skip_duplicate_items = skip_duplicate_items
+        self._added_item_keys: set[str] = set()
         self._sessions_table = sessions_table
         self._messages_table = messages_table
 
@@ -70,6 +80,7 @@ class DjangoSession(SessionABC):
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
         create_tables: bool = False,
+        skip_duplicate_items: bool = False,
     ) -> DjangoSession:
         """Create a session using Django's configured database settings.
 
@@ -81,6 +92,7 @@ class DjangoSession(SessionABC):
             sessions_table: Database table name for session metadata.
             messages_table: Database table name for conversation messages.
             create_tables: If True, create tables if they don't exist.
+            skip_duplicate_items: If True, skip items this instance already added.
 
         Returns:
             A new DjangoSession instance.
@@ -90,7 +102,14 @@ class DjangoSession(SessionABC):
             sessions_table=sessions_table,
             messages_table=messages_table,
             create_tables=create_tables,
+            skip_duplicate_items=skip_duplicate_items,
         )
+
+    @staticmethod
+    def _item_key(item: TResponseInputItem) -> str:
+        """Return a stable content hash for a conversation item."""
+        payload = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _ensure_tables(self) -> None:
         """Create tables if they don't exist (sync operation at init time).
@@ -141,6 +160,17 @@ class DjangoSession(SessionABC):
         Args:
             items: List of conversation items to add.
         """
+        new_keys: set[str] = set()
+        if self._skip_duplicate_items:
+            unique_items = []
+            for item in items:
+                key = self._item_key(item)
+                if key in self._added_item_keys or key in new_keys:
+                    continue
+                new_keys.add(key)
+                unique_items.append(item)
+            items = unique_items
+
         if not items:
             return
 
@@ -154,6 +184,8 @@ class DjangoSession(SessionABC):
             self._message_model(session=session, data=item) for item in items
         ]
         await self._message_model.objects.abulk_create(messages)
+        # Remember items only once they are stored, so a failed write can be retried.
+        self._added_item_keys.update(new_keys)
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
@@ -178,7 +210,10 @@ class DjangoSession(SessionABC):
                 msg.delete()
                 return data
 
-        return await _atomic_pop()
+        item = await _atomic_pop()
+        if item is not None and self._skip_duplicate_items:
+            self._added_item_keys.discard(self._item_key(item))
+        return item
 
     async def clear_session(self) -> None:
         """Clear all items for this session.
@@ -186,6 +221,7 @@ class DjangoSession(SessionABC):
         This deletes messages first, then the session record to respect
         foreign key constraints.
         """
+        self._added_item_keys.clear()
         # Delete messages first (respects FK constraints)
         await self._message_model.objects.filter(
             session__session_id=self.session_id

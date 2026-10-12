@@ -62,6 +62,24 @@ session = DjangoSession(
 )
 ```
 
+### Running Several Agents on One Session
+
+Each `Runner.run` call stores its input in the session. When you run several agents in turn on the
+same session with the same user message (for example a triage agent followed by a router agent),
+that message is stored once per run. Pass `skip_duplicate_items=True` to have `add_items` skip any
+item identical to one the same `DjangoSession` instance already added:
+
+```python
+session = DjangoSession("user-123", skip_duplicate_items=True)
+
+result = await Runner.run(triage_agent, user_message, session=session)
+result = await Runner.run(router_agent, user_message, session=session)  # message stored once
+```
+
+The check is per instance, so create one `DjangoSession` per request or turn. With the option on,
+identical items added through the same instance are stored once, so a user repeating the exact same
+message later in that instance's lifetime is stored once too.
+
 ### Using with Django Settings
 
 ```python
@@ -82,6 +100,7 @@ class DjangoSession(SessionABC):
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
         create_tables: bool = False,
+        skip_duplicate_items: bool = False,
     ) -> None: ...
 
     @classmethod
@@ -92,6 +111,7 @@ class DjangoSession(SessionABC):
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
         create_tables: bool = False,
+        skip_duplicate_items: bool = False,
     ) -> DjangoSession: ...
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]: ...
@@ -108,6 +128,7 @@ class DjangoSession(SessionABC):
 | `sessions_table` | `str` | `"agent_sessions"` | Database table name for session metadata |
 | `messages_table` | `str` | `"agent_messages"` | Database table name for conversation messages |
 | `create_tables` | `bool` | `False` | Auto-create tables if they don't exist (dev/test only) |
+| `skip_duplicate_items` | `bool` | `False` | Skip items identical to one this instance already added |
 
 ### Methods
 
