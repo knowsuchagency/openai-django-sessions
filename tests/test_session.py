@@ -171,6 +171,95 @@ class TestDjangoSession:
 
 
 @pytest.mark.django_db(transaction=True)
+class TestSkipDuplicateItems:
+    """Tests for the skip_duplicate_items option."""
+
+    async def test_duplicates_kept_by_default(self, session: DjangoSession) -> None:
+        """Without the option, identical items are stored every time."""
+        await session.add_items([{"role": "user", "content": "yes"}])
+        await session.add_items([{"role": "user", "content": "yes"}])
+
+        items = await session.get_items()
+        assert len(items) == 2
+
+    async def test_second_agent_run_does_not_duplicate_input(
+        self, db_tables
+    ) -> None:
+        """Two runs sharing a session and user input store the input once."""
+        session = DjangoSession("multi-agent", skip_duplicate_items=True)
+        user_message = {"role": "user", "content": "What's the weather?"}
+
+        # First agent run: input plus its output
+        await session.add_items([user_message])
+        await session.add_items(
+            [{"role": "assistant", "content": "routing", "id": "msg_1"}]
+        )
+        # Second agent run with the same input
+        await session.add_items([dict(user_message)])
+        await session.add_items(
+            [{"role": "assistant", "content": "Sunny.", "id": "msg_2"}]
+        )
+
+        items = await session.get_items()
+        assert [item["content"] for item in items] == [
+            "What's the weather?",
+            "routing",
+            "Sunny.",
+        ]
+
+    async def test_key_order_does_not_matter(self, db_tables) -> None:
+        """Items with the same content in a different key order are duplicates."""
+        session = DjangoSession("key-order", skip_duplicate_items=True)
+
+        await session.add_items([{"role": "user", "content": "hi"}])
+        await session.add_items([{"content": "hi", "role": "user"}])
+
+        assert len(await session.get_items()) == 1
+
+    async def test_dedupe_is_per_instance(self, db_tables) -> None:
+        """A new instance for the same session id starts with no memory."""
+        first = DjangoSession("per-instance", skip_duplicate_items=True)
+        second = DjangoSession("per-instance", skip_duplicate_items=True)
+
+        await first.add_items([{"role": "user", "content": "yes"}])
+        await second.add_items([{"role": "user", "content": "yes"}])
+
+        assert len(await first.get_items()) == 2
+
+    async def test_pop_allows_readding(self, db_tables) -> None:
+        """A popped item can be added again."""
+        session = DjangoSession("pop-readd", skip_duplicate_items=True)
+        item = {"role": "user", "content": "retry me"}
+
+        await session.add_items([item])
+        assert await session.pop_item() == item
+        await session.add_items([item])
+
+        assert await session.get_items() == [item]
+
+    async def test_clear_resets_memory(self, db_tables) -> None:
+        """clear_session forgets previously added items."""
+        session = DjangoSession("clear-reset", skip_duplicate_items=True)
+        item = {"role": "user", "content": "again"}
+
+        await session.add_items([item])
+        await session.clear_session()
+        await session.add_items([item])
+
+        assert await session.get_items() == [item]
+
+    async def test_from_settings_passes_option(self, db_tables) -> None:
+        """from_settings accepts skip_duplicate_items."""
+        session = DjangoSession.from_settings(
+            "from-settings-dedupe", skip_duplicate_items=True
+        )
+        await session.add_items([{"role": "user", "content": "x"}])
+        await session.add_items([{"role": "user", "content": "x"}])
+
+        assert len(await session.get_items()) == 1
+
+
+@pytest.mark.django_db(transaction=True)
 class TestCustomTables:
     """Tests for custom table names."""
 
